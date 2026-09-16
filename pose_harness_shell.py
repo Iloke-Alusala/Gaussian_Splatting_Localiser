@@ -42,6 +42,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import cv2
+import os
+
+# Shared debug output path for localise() and the CLI runner.
+save_path = None
+
 
 # Reuse from the diagnostic. Do not reimplement these; a fix in one place should
 # fix both programs. See roadmap section 4.
@@ -97,7 +102,7 @@ def freeze_map(pipeline) -> None:
 # STEP 1  -  DIFFERENTIABLE RENDERING
 # ============================================================================
 
-def render_differentiable(
+def render_differentiable(  
     pipeline,
     camera,
     c2w_4x4: torch.Tensor,
@@ -508,19 +513,6 @@ def check_step3(pipeline, views, scale) -> None:
 # STEP 4  -  THE OPTIMISATION LOOP
 # ============================================================================
 
-# ============================================================================
-# STEP 4  -  THE OPTIMISATION LOOP
-# ============================================================================
-
-
-# ============================================================================
-# STEP 4  -  THE OPTIMISATION LOOP
-# ============================================================================
-
-# ============================================================================
-# STEP 4  -  THE OPTIMISATION LOOP
-# ============================================================================
-
 
 @dataclass
 class LocaliseResult:
@@ -533,7 +525,6 @@ class LocaliseResult:
     termination: str          # "loss_plateau" | "step_small" | "max_iters"
     loss_history: list[float] = field(default_factory=list)
     pose_history: list[torch.Tensor] = field(default_factory=list)
-
 
 def localise(
     pipeline,
@@ -548,31 +539,6 @@ def localise(
 ) -> LocaliseResult:
     """
     The localiser. Descend the photometric objective from T_init.
-
-    CONTRACT
-        in : a frozen map, intrinsics, a query image, an initial pose
-        out: LocaliseResult with every field populated
-
-    TODO
-      1. Loop: fresh xi = zeros(requires_grad=True) each iteration, render,
-         loss, backward, optimiser step, retract with apply_update, reset.
-         Re-parameterising each iteration keeps every step in the
-         well-conditioned region near the origin of the exponential map.
-      2. Adam over xi. Note the optimiser state is over a tensor you recreate
-         each iteration, so either recreate the optimiser too (simplest, loses
-         momentum) or keep a persistent xi and zero it after retraction
-         (keeps momentum, needs care). Start with the simple version.
-      3. SEPARATE LEARNING RATES for the translation and rotation halves.
-         A tangent component of 0.01 is 1 cm of translation but 0.57 degrees of
-         rotation, and in scene units the mismatch can be far larger. One shared
-         rate will either barely rotate or wildly overshoot in translation.
-         Pass two parameter groups to Adam. Roadmap section 3, step 4.
-      4. All THREE convergence criteria, and record WHICH fired. "Converged"
-         and "hit the iteration cap" are different outcomes and conflating them
-         will corrupt your results table.
-      5. Append to loss_history and pose_history every iteration.
-
-    Roadmap section 3, step 4.
     """
     device = T_init.device
     dtype = T_init.dtype
@@ -585,28 +551,36 @@ def localise(
     actual_iters = 0
     prev_loss: float | None = None
 
-    # Persistent second-moment accumulator (RMSprop/Adam-style scale normalization)
-    v = torch.zeros(6, device=device, dtype=dtype)
-    beta2 = 0.99
-    eps = 1e-8
+    # 1. Decoupled parameter groups for translation and rotation
+    rho = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
+    phi = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
 
-    lrs = torch.tensor(
-        [lr_trans, lr_trans, lr_trans, lr_rot, lr_rot, lr_rot],
-        device=device,
-        dtype=dtype,
-    )
+    # 2. PyTorch Native Adam automatically handles bias correction (prevents first-step explosion)
+    optimizer = torch.optim.Adam([
+        {"params": [rho], "lr": lr_trans},
+        {"params": [phi], "lr": lr_rot},
+    ])
+    
+    # 3. Scheduler to smoothly decay step sizes and guarantee settling without bouncing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=1e-6)
 
     first_render = None
     last_render = None
 
     for i in range(max_iters):
         actual_iters = i + 1
+        optimizer.zero_grad()
 
-        # 1. Fresh zero tangent parameter vector
-        xi = torch.zeros(6, device=device, dtype=dtype, requires_grad=True)
+        # Zero the tangent vector values to reset the Taylor expansion, but keep Adam's momentum intact!
+        with torch.no_grad():
+            rho.zero_()
+            phi.zero_()
+
+        # 4. Concatenate and retract
+        xi = torch.cat([rho, phi], dim=0)
         T_candidate = apply_update(T_curr, xi)
 
-        # 2. Render & Photometric loss
+        # 5. Forward & Loss
         rendered = render_differentiable(pipeline, camera, T_candidate)
         if i == 0:
             first_render = rendered.detach().clone()
@@ -616,52 +590,52 @@ def localise(
         current_loss = loss.item()
         loss_history.append(current_loss)
 
-        # Check plateau criterion
         if prev_loss is not None and abs(prev_loss - current_loss) < tol_loss:
             termination = "loss_plateau"
             break
         prev_loss = current_loss
 
-        # 3. Backward
+        # 6. Backward & Step
         loss.backward()
-        g = xi.grad.detach()
+        optimizer.step()
+        scheduler.step()
 
-        # 4. Adaptive Step (RMSprop on body-frame tangent gradients)
+        # 7. Apply the computed step to the accumulated pose
         with torch.no_grad():
-            v = beta2 * v + (1.0 - beta2) * (g ** 2)
-            # Step down the gradient with adaptive per-component scaling
-            xi_step = -lrs * (g / (torch.sqrt(v) + eps))
-
+            xi_step = torch.cat([rho, phi], dim=0)
             step_norm = torch.linalg.norm(xi_step).item()
+
             if i % 25 == 0 or i == max_iters - 1:
-                g_t_norm = torch.linalg.norm(g[:3]).item()
-                g_r_norm = torch.linalg.norm(g[3:]).item()
-                print(f"    iter {i:03d} | loss: {current_loss:.6f} | |g_t|: {g_t_norm:.2e} | |g_r|: {g_r_norm:.2e} | |step|: {step_norm:.2e}")
+                mse = torch.nn.functional.mse_loss(rendered, query.to(device)).item()
+                psnr = -10.0 * math.log10(mse) if mse > 0 else float("inf")
+                print(f"    iter {i:03d} | loss: {current_loss:.6f} | psnr: {psnr:.2f} dB | |step|: {step_norm:.2e}")
 
             if step_norm < tol_step:
                 termination = "step_small"
                 break
 
-            # 5. Retraction
             T_curr = apply_update(T_curr, xi_step)
             pose_history.append(T_curr.clone())
 
-    # Save visual debug comparison images to disk
+    # 8. Save Visuals
     if first_render is not None and last_render is not None:
+        import os, cv2
+        import numpy as np
         q_img = (query.detach().cpu().numpy() * 255).astype(np.uint8)[:, :, ::-1]
         init_img = (first_render.detach().cpu().numpy() * 255).astype(np.uint8)[:, :, ::-1]
         final_img = (last_render.detach().cpu().numpy() * 255).astype(np.uint8)[:, :, ::-1]
         diff_init = np.abs(init_img.astype(float) - q_img.astype(float)).astype(np.uint8)
         diff_final = np.abs(final_img.astype(float) - q_img.astype(float)).astype(np.uint8)
 
-        # Row 1: Query | Initial Render | Final Render
-        # Row 2: Black | Initial Diff   | Final Diff
         black = np.zeros_like(q_img)
         row1 = np.hstack([q_img, init_img, final_img])
         row2 = np.hstack([black, diff_init, diff_final])
         grid = np.vstack([row1, row2])
-        cv2.imwrite("debug_step4_comparison.png", grid)
-        print("  [debug] Saved visual comparison grid -> debug_step4_comparison.png")
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        save_path = os.path.join(script_dir, "debug_step4_comparison.png")
+        cv2.imwrite(save_path, grid)
+        print(f"  [debug] Saved visual comparison grid -> {save_path}")
 
     return LocaliseResult(
         T_final=T_curr,
@@ -670,7 +644,6 @@ def localise(
         loss_history=loss_history,
         pose_history=pose_history,
     )
-
 
 def check_step4(pipeline, views, scale) -> None:
     """
@@ -683,14 +656,14 @@ def check_step4(pipeline, views, scale) -> None:
     camera, query = views[0]
     gt = to_4x4(camera.camera_to_worlds[0])
     gen = torch.Generator().manual_seed(1)
-    T0 = perturb_pose(gt, make_perturbation(0.1 * scale, 10.0, generator=gen))
+    T0 = perturb_pose(gt, make_perturbation(3 * scale, 2.0, generator=gen))
 
     res = localise(
         pipeline,
         camera,
         query,
         T0.to(pipeline.device).float(),
-        max_iters=250,
+        max_iters=1000,
         lr_trans=2e-3,
         lr_rot=2e-3,
     )
@@ -846,12 +819,24 @@ CHECKS = {
     4: check_step4,
 }
 
-
 def main():
+    global save_path
+
+    # 1. Hardcode your persistent base directory and config path
+    DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS/data/desk-test-2/raw-images"
+    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/processed/splatfacto/2026-08-16_104231/config.yml"
+
+    # Step 4 image save directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_path = os.path.join(script_dir, "debug_step4_comparison.png")
+
+    # 2. Force execution context to the base dir so Nerfstudio finds its checkpoints
+    os.chdir(DEFAULT_BASE_DIR)
+
     # set the arguments that will be passed to the script from the command line
     ap = argparse.ArgumentParser()
-    # the config file is required and must be a valid path
-    ap.add_argument("config", type=Path)
+    # The config file is now OPTIONAL (nargs="?"). If omitted, it uses the default.
+    ap.add_argument("config", type=Path, nargs="?", default=Path(DEFAULT_CONFIG))
     # the step argument, which is required and must be one of the keys in CHECKS
     ap.add_argument("--step", type=int, required=True, choices=sorted(CHECKS))
     # the device argument, which is optional and defaults to "cuda". We default to CUDA because the harnes is designed to run on GPU, but user can override this to run on CPU.
@@ -863,15 +848,9 @@ def main():
     views = get_eval_views(pipeline, max_views=2)
     print(f"[info] scale={scale:.6f}, {len(views)} eval views")
 
-    for s in range(4, args.step + 1):
+    for s in range(1, args.step + 1):
         print(f"\n--- step {s} ---")
         CHECKS[s](pipeline, views, scale)
 
-
 if __name__ == "__main__":
     main()
-    # print(se3_exp_torch(torch.tensor([0.01, 0.02, 0.03, 0.04, 0.05, 0.06], dtype=torch.float64)))
-    # cfg_path = Path("configs/pose_harness.yaml")
-    # _cfg, pipeline, scale = load_pipeline(cfg_path, "cpu")
-    # views = get_eval_views(pipeline, max_views=2)
-    # check_step2(pipeline, views, scale)
