@@ -631,32 +631,30 @@ def coarse_global_retrieval(pipeline, query: torch.Tensor, device="cuda") -> tor
     processor = CLIPProcessor.from_pretrained(model_id)
     model = CLIPModel.from_pretrained(model_id).to(device)
 
-    # Get the trained dataset from the pipeline object
     train_ds = pipeline.datamanager.train_dataset
     print(f"  [coarse] Extracting features for {len(train_ds)} training images...")
 
-    # Get the noramlised vector of the query's semsantic meaning
     query_feat = get_clip_features(query, processor, model, device)
     
-    best_sim = -1.0
-    best_pose = None
+    results = []
     
-    # In a real deployment, training features would be pre-computed and cached.
-    # We compute them live here for simplicity.
     for i in range(len(train_ds)):
         train_img = train_ds[i]["image"]
         train_pose = to_4x4(train_ds.cameras[i:i+1].camera_to_worlds[0].cpu())
         
         train_feat = get_clip_features(train_img, processor, model, device)
-        
-        # Cosine similarity between normalized vectors is just the dot product
         sim = (query_feat @ train_feat.T).item()
-        
-        if sim > best_sim:
-            best_sim = sim
-            best_pose = train_pose
+        results.append((sim, i, train_pose))
             
-    print(f"  [coarse] Best match found with cosine similarity: {best_sim:.4f}")
+    # Sort by similarity (highest first)
+    results.sort(key=lambda x: x[0], reverse=True)
+    
+    print("  [coarse] Top 5 CLIP matches:")
+    for rank in range(5):
+        sim, idx, _ = results[rank]
+        print(f"    Rank {rank+1}: Image {idx:03d} | Cosine Sim: {sim:.4f}")
+        
+    best_pose = results[0][2]
     return best_pose
 
 def check_step6(pipeline, views, scale) -> None:
@@ -695,7 +693,7 @@ def check_step6(pipeline, views, scale) -> None:
         camera=base_camera,
         query=query,
         T_init=T_init.to(pipeline.device).float(),
-        max_iters=500,
+        max_iters=1000,
         lr_trans=2e-3,
         lr_rot=2e-3
     )
