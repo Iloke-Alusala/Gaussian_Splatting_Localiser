@@ -156,6 +156,25 @@ def get_eval_views(pipeline, max_views: int | None = None):
         views.append((camera, image))
     return views
 
+import random
+
+def get_random_eval_views(pipeline, max_views: int = 5):
+    """Grabs N random ground truth images from the evaluation dataset."""
+    cameras = pipeline.datamanager.eval_dataset.cameras
+    total_cams = len(cameras)
+    
+    # Pick random indices
+    random_indices = random.sample(range(total_cams), min(max_views, total_cams))
+    
+    views = []
+    for idx in random_indices:
+        camera = cameras[idx:idx+1]
+        # Get the actual image from the dataset
+        query_img = pipeline.datamanager.eval_dataset[idx]["image"]
+        views.append((camera, query_img))
+        
+    return views
+
 # Step 3 - Rendering at an arbitrary pose we choose
 
 def render_at_pose(pipeline, camera, c2w_4x4: torch.Tensor) -> torch.Tensor:

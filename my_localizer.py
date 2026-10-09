@@ -9,12 +9,16 @@ from pathlib import Path
 import numpy as np
 import torch
 import cv2
+import csv
 import os
+import matplotlib 
+import matplotlib.pyplot as plt
 
 from my_pose_harness import (
     POSE_THRESHOLDS,
     Scorer,
     get_eval_views,
+    get_random_eval_views,
     load_pipeline,
     make_perturbation,
     perturb_pose,
@@ -76,14 +80,16 @@ def render_differentiable(pipeline, camera, c2w_4x4: torch.Tensor) -> torch.Tens
     return outputs["rgb"]
 
 def photometric_loss(rendered: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
-    """
-    Gets the grayscaled MSE between the two images. Returns a scalar value
-    """
-    # what is special about these values? -> [0.299, 0.587, 0.114]
+    """ Scalar objective. Grayscale mean squared error on RGB channels. """
     w = torch.tensor([0.299, 0.587, 0.114], device=rendered.device)
-    r_gray = (rendered * w).sum(-1)
-    q_gray = (query.to(rendered.device) * w).sum(-1)
-    return ((r_gray - q_gray)**2).mean()
+    
+    # Slice [..., :3] to guarantee 3 channels even if an alpha channel is present
+    r_rgb = rendered[..., :3]
+    q_rgb = query.to(rendered.device)[..., :3]
+    
+    r_gray = (r_rgb * w).sum(-1)
+    q_gray = (q_rgb * w).sum(-1)
+    return ((r_gray - q_gray) ** 2).mean()
 
 def check_step1(pipeline, views, scale) -> None:
     """
@@ -356,36 +362,40 @@ def localise(
         max_iters: int = 250,
         lr_trans: float = 2e-3,
         lr_rot: float = 2e-3,
-        tol_loss: float = 1e-9, # tolerance threshold loss
-        tol_step: float = 1e-6, # toleranch threshold step size
+        tol_loss: float = 1e-9, 
+        tol_step: float = 1e-6, 
+        loss_type: str = "mse", # <--- NEW: Dynamic metric selection
         debug_name: str = "debug_localise"
         ) -> LocaliseResult:
     """
-    The localiser. Descend the photometric objective from T_init
+    The localiser. Descend the photometric objective from T_init back to the query pose
     """
+    # 1. Force query to 3 RGB channels (strips alpha channel if present)
+    query = query[..., :3].to(T_init.device)
     device = T_init.device
     dtype = T_init.dtype
+
+    # Create the metrics functions that you chose and are going to use
+    lpips_loss_fn = None
+    if loss_type == "lpips":
+        from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+        lpips_loss_fn = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
     T_curr = T_init.clone()
     loss_history: list[float] = []
     pose_history: list[torch.Tensor] = [T_curr.clone()]
 
-    # default termination is too many iterations
     termination = "max_iters"
     actual_iters = 0
     prev_loss: float | None = None
 
-    # 1. Decoupled parameter groups for translation and rotation
     rho = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
     phi = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
 
-    # 2. PyTorch Native Adam handles the bias correction (prevents first-step explosion) -> How?
     optimizer = torch.optim.Adam([
         {"params": [rho], "lr": lr_trans},
         {"params": [phi], "lr": lr_rot},
     ])
-
-    # 3. Scheduler smootly decays step sizes and guarantees settling without bouncing
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=1e-6)
 
     first_render = None
@@ -393,26 +403,38 @@ def localise(
 
     for i in range(max_iters):
         actual_iters = i + 1
-        optimizer.zero_grad() # What does this do?
+        optimizer.zero_grad() 
 
-        # Zero tangent vector values and reset Taylor Expansion
         with torch.no_grad():
             rho.zero_()
             phi.zero_()
 
-        # Concatenate and retract
         xi = torch.cat([rho, phi], dim=0)
         T_candidate = apply_update(T_curr, xi)
 
-        # Forward & Loss
         rendered = render_differentiable(pipeline, camera, T_candidate)
-        # create the first render only at the beginning
+        rendered_rgb = rendered[..., :3]
+        
         if i == 0:
             first_render = rendered.detach().clone()
-        # create the last render 
         last_render = rendered.detach().clone()
-        # get loss as a scalar
-        loss = photometric_loss(rendered, query)
+
+        # Dynamic Loss Calculation
+        if loss_type == "mse":
+            loss = torch.nn.functional.mse_loss(rendered_rgb, query)
+        elif loss_type == "lpips":
+            r_nchw = rendered_rgb.permute(2, 0, 1).unsqueeze(0)
+            q_nchw = query.permute(2, 0, 1).unsqueeze(0)
+            import torch.nn.functional as F
+
+            # Downsample by 50% using bilinear interpolation
+            r_small = F.interpolate(r_nchw, scale_factor=0.5, mode='bilinear', align_corners=False)
+            q_small = F.interpolate(q_nchw, scale_factor=0.5, mode='bilinear', align_corners=False)
+
+            loss = lpips_loss_fn(r_small, q_small)
+        else:
+            raise ValueError(f"Unsupported loss_type: '{loss_type}'. Choose 'mse' or 'lpips'.")
+
         current_loss = loss.item()
         loss_history.append(current_loss)
 
@@ -421,21 +443,19 @@ def localise(
             break
         prev_loss = current_loss
 
-        # 6. backward & step
         loss.backward()
         optimizer.step()
         scheduler.step()
 
-        # 7. Apply the computed step to the accumulated pose
         with torch.no_grad():
             xi_step = torch.cat([rho, phi], dim = 0)
             step_norm  = torch.linalg.norm(xi_step).item()
 
             if i % 25 == 0 or i == max_iters - 1:
-                # Report the results at the end
-                mse = torch.nn.functional.mse_loss(rendered, query.to(device)).item()
-                psnr = -10.0 * math.log10(mse) if mse > 0 else float("inf")
-                print(f"    iter {i:03d} | loss: {current_loss:.6f} | psnr: {psnr:.2f} dB | |step|: {step_norm:.2e}")
+                # Always calculate PSNR just for human-readable tracking in the terminal
+                mse_val = torch.nn.functional.mse_loss(rendered_rgb, query).item()
+                psnr = -10.0 * math.log10(mse_val) if mse_val > 0 else float("inf")
+                print(f"    iter {i:03d} | {loss_type} loss: {current_loss:.4f} | psnr: {psnr:.2f} dB | |step|: {step_norm:.2e}")
 
             if step_norm < tol_step:
                 termination = "step_small"
@@ -444,33 +464,37 @@ def localise(
             T_curr = apply_update(T_curr, xi_step)
             pose_history.append(T_curr.clone())
 
-    # Save the visuals
+            del rendered, rendered_rgb, loss, xi_step
+            torch.cuda.empty_cache()
+
+    # Save the visuals (unchanged)
     if first_render is not None and last_render is not None:
-        q_img = (query.detach().cpu().numpy() * 255).astype(np.uint8)[:, :, ::-1]
-        init_img = (first_render.detach().cpu().numpy() * 255).astype(np.uint8)[:, :, ::-1]
-        final_img = (last_render.detach().cpu().numpy() * 255).astype(np.uint8)[:, :, ::-1]
-        # calculate the differences between the initial images and the final images
-        # This difference is just the absolute difference
+        q_np = query.detach().cpu().numpy()
+        q_img = (q_np * 255).astype(np.uint8)[:, :, ::-1]
+        init_img = (first_render.detach().cpu().numpy()[..., :3] * 255).astype(np.uint8)[:, :, ::-1]
+        final_img = (last_render.detach().cpu().numpy()[..., :3] * 255).astype(np.uint8)[:, :, ::-1]
+        
         diff_init = np.abs(init_img.astype(float) - q_img.astype(float)).astype(np.uint8)
         diff_final = np.abs(final_img.astype(float) - q_img.astype(float)).astype(np.uint8)
 
-        # Develop the final image. Give the black square same dimensions as q_image
         black = np.zeros_like(q_img)
         row1 = np.hstack([q_img, init_img, final_img])
         row2 = np.hstack([black, diff_init, diff_final])
         grid = np.vstack([row1, row2])
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        save_path = os.path.join(script_dir, f"{debug_name}.png")
+        # CHANGE THIS FILE BACK
+        out_dir = os.path.join(script_dir, "room_output_LPIP")
+        os.makedirs(out_dir, exist_ok=True)
+        save_path = os.path.join(out_dir, f"{debug_name}.png")
         cv2.imwrite(save_path, grid)
-        print(f"  [debug] Saved Final Image -> {save_path}")
 
     return LocaliseResult(
         T_final=T_curr,
         iterations=actual_iters,
         termination=termination,
         loss_history=loss_history,
-        pose_history=pose_history,
+        pose_history=[p.detach().cpu() for p in pose_history],
     )
 
 def check_step4(pipeline, views, scale) -> None:
@@ -549,9 +573,10 @@ def capture_radius_sweep(
                     camera=camera,
                     query=query,
                     T_init=T_init.to(pipeline.device).float(),
-                    max_iters=250, # Standard early stop threshold
-                    lr_trans=2e-3,
-                    lr_rot=2e-3,
+                    max_iters=500, # Standard early stop threshold
+                    lr_trans=2e-4,
+                    lr_rot=2e-4,
+                    loss_type = "lpips",
                     debug_name=f"sweep_v{v_idx}_t{t_mag}_r{r_mag}_trial{k}"
                 )
                 
@@ -582,24 +607,71 @@ def check_step5(pipeline, views, scale) -> None:
     """
     Runs the capture radius sweep to scientifically define the boundaries of the fine optimizer.
     """
+    matplotlib.use("Agg")
     # Test a small set of magnitudes (t_mag in scene units, r_mag in degrees)
     # Kept small so it finishes in a reasonable time while you eat
     magnitudes = [
-        # (0.01, 0.5),
-        # (0.05, 2.0),
-        # (0.10, 5.0),
+        (0.01, 0.5),
+        (0.05, 2.0),
+        (0.10, 5.0),
         (0.20, 10.0),
-        (0.30, 15.0),
-        (0.40, 20)
+        #(0.30, 15.0),
+        #(0.40, 20)
     ]
+
     print(f"  Running sweep across {len(magnitudes)} magnitudes...")
-    # n_trials=3 to keep it relatively fast for this test run
+    
     results = capture_radius_sweep(pipeline, views, scale, magnitudes, n_trials=3)
     print(f"  STEP 5 COMPLETE. Generated {len(results)} data points.")
 
+    if not results:
+        return
+
+    # 1. Save the CSV
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    out_dir = os.path.join(script_dir, "outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    
+    csv_path = os.path.join(out_dir, "step5_capture_radius.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(results[0].keys()))
+        w.writeheader()
+        w.writerows(results)
+    print(f"  [info] Wrote capture radius data to {csv_path}")
+
+    # 2. Graph the metrics
+    by_mag = {}
+    for r in results:
+        t_mag = r["t_mag_scene"]
+        by_mag.setdefault(t_mag, []).append(r["t_err_final_scene"])
+    
+    # Calculate median and interquartile range (IQR) to handle outliers smoothly
+    x = sorted(by_mag.keys())
+    med = [np.median(by_mag[k]) for k in x]
+    lo = [np.percentile(by_mag[k], 25) for k in x]
+    hi = [np.percentile(by_mag[k], 75) for k in x]
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(x, med, marker="o", color="blue", label="Median Final Error")
+    ax.fill_between(x, lo, hi, alpha=0.2, color="blue", label="25th-75th Percentile")
+    
+    # Plot a reference line (y=x) to show where the optimizer failed completely (final error == initial error)
+    ax.plot(x, x, linestyle="--", color="red", alpha=0.5, label="Failed to Optimize (y=x)")
+
+    ax.set_xlabel("Initial Translation Perturbation (Scene Units)")
+    ax.set_ylabel("Final Translation Error (Scene Units)")
+    ax.set_title("Fine Stage Capture Radius")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plot_path = os.path.join(out_dir, "step5_capture_radius.png")
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"  [info] Wrote error surface plot to {plot_path}")
+
 # Step 6 - Coarse Global Retrieval
 
-def get_clip_features(image_tensor: torch.Tensor, processor, model, device) -> torch.Tensor:
+def get_clip_features(image: torch.Tensor, processor, model, device):
     """
     Helper to convert HWC tensor to CLIP embeddings.
     INPUT: 
@@ -610,14 +682,27 @@ def get_clip_features(image_tensor: torch.Tensor, processor, model, device) -> t
     Returns:
         torch.Tensor: A normalized 1D feature vector representing the semantic embedding of the input image.
     """
-    # Convert from [0, 1] tensor to uint8 numpy array for the processor
-    img_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
-    inputs = processor(images=img_np, return_tensors="pt").to(device) # returns as pytorch tensor (pt)
+    import numpy as np
+    from PIL import Image
+    import torch
+    
+    # 1. Force the Nerfstudio HWC tensor to a CPU numpy array
+    img_np = image.detach().cpu().numpy()
+    
+    # 2. Scale float [0, 1] to uint8 [0, 255]
+    if img_np.dtype in [np.float32, np.float64]:
+        img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+        
+    # 3. PIL Image conversion is bulletproof for HuggingFace processors
+    pil_img = Image.fromarray(img_np)
+    
+    # 4. Extract features
+    inputs = processor(images=pil_img, return_tensors="pt").to(device)
     with torch.no_grad():
-        # Get the features
-        features = model.get_image_features(**inputs)
-    # Return the semantic meaning embedded into higher dimension for is. scales the feature vector so its total magnitude equals exactly 1
-    return torch.nn.functional.normalize(features, p=2, dim=-1)
+        feat = model.get_image_features(**inputs)
+    
+    # Normalize the embeddings for cosine similarity
+    return feat / feat.norm(dim=-1, keepdim=True)
 
 def coarse_global_retrieval(pipeline, query: torch.Tensor, device="cuda") -> torch.Tensor:
     """
@@ -695,7 +780,8 @@ def check_step6(pipeline, views, scale) -> None:
         T_init=T_init.to(pipeline.device).float(),
         max_iters=1000,
         lr_trans=2e-3,
-        lr_rot=2e-3
+        lr_rot=2e-3,
+        loss_type="mse"
     )
 
     # 4. Final Evaluation & Matrix Verification
@@ -807,15 +893,19 @@ CHECKS = {
 }
 
 def main():
+    torch.set_float32_matmul_precision('high')
     global save_path
 
     # 1. Hardcode your persistent base directory and config path
-    DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS/data/desk-test-2/raw-images"
-    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/processed/splatfacto/2026-08-16_104231/config.yml"
+    # DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS/data/desk-test-2/raw-images"
+    # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/processed/splatfacto/2026-08-16_104231/config.yml"
+    DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS"
+    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/agri-s12/splatfacto/2026-09-16_203014/config.yml"
+    
 
     # Step 4 image save directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    save_path = os.path.join(script_dir, "debug_step4_comparison.png")
+    save_path = os.path.join(script_dir, "outputs/debug_step4_comparison.png")
 
     # set the arguments that will be passed to the script from the command line
     ap = argparse.ArgumentParser()
@@ -829,9 +919,16 @@ def main():
 
     _cfg, pipeline, scale = load_pipeline(args.config, args.device)
     freeze_map(pipeline)
+
+    # check stats for dataparser
+    train_files = {p.name for p in pipeline.datamanager.train_dataset._dataparser_outputs.image_filenames}
+    eval_files  = [p.name for p in pipeline.datamanager.eval_dataset._dataparser_outputs.image_filenames]
+
+    print(f"[info] train={len(train_files)} eval={len(eval_files)}")
+    print(f"[info] overlap={len(train_files & set(eval_files))}")
     
     # We use 2 views for a faster test run, increase later if you want a full benchmark -> These views are the renders at the ground truths right?
-    views = get_eval_views(pipeline, max_views=2)
+    views = get_eval_views(pipeline, max_views=5)
     print(f"[info] scale={scale:.6f}, {len(views)} eval views")
 
     for s in range(6, args.step + 1):
