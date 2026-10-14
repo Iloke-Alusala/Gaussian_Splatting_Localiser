@@ -67,7 +67,7 @@ class ClipRetriever:
                 self.index_poses = data["poses"]
             return
 
-        print(f"  [{self.name}] Building index for {len(images)} images...")
+        print(f"  [{self.name}] Building index for {len(poses)} images...")
         feats = []
         for img in images:
             feats.append(self._get_features(img))
@@ -149,7 +149,7 @@ class MegaLocRetriever:
                 self.index_poses = data["poses"]
             return
 
-        print(f"  [{self.name}] Building index for {len(images)} images...")
+        print(f"  [{self.name}] Building index for {len(poses)} images...")
         feats = []
         for img in images:
             feats.append(self._get_features(img))

@@ -75,14 +75,14 @@ def get_retriever(pipeline, device="cuda"):
         raise ValueError(f"Unknown retriever '{RETRIEVER_NAME}'. Use clip or megaloc.")
 
     train_ds = pipeline.datamanager.train_dataset
-    imgs = [train_ds[i]["image"] for i in range(len(train_ds))]
+    imgs = (train_ds[i]["image"] for i in range(len(train_ds)))
     poses = [to_4x4(train_ds.cameras[i:i + 1].camera_to_worlds[0].cpu())
              for i in range(len(train_ds))]
 
     # image count in the key so a changed split invalidates the cache
     r.build_index(imgs, poses,
                   cache_dir=INDEX_CACHE_DIR,
-                  dataset_name=f"{_DATASET_NAME}_n{len(imgs)}")
+                  dataset_name=f"{_DATASET_NAME}_n{len(poses)}")
     _RETRIEVER = r
     return _RETRIEVER
 
@@ -327,16 +327,16 @@ def generate_interactive_query(pipeline, camera, start_pose: torch.Tensor, step_
             cv2.destroyAllWindows()
             return img_tensor, current_pose
 
-        elif key == ord('w'): delta_t[2] = step_units
-        elif key == ord('s'): delta_t[2] = -step_units
+        elif key == ord('s'): delta_t[2] = step_units
+        elif key == ord('w'): delta_t[2] = -step_units
         elif key == ord('a'): delta_t[0] = -step_units
         elif key == ord('d'): delta_t[0] = step_units
         elif key == ord('q'): delta_t[1] = -step_units
         elif key == ord('e'): delta_t[1] = step_units
         elif key in [65362, 82]: omega[0] = rot_step
         elif key in [65364, 84]: omega[0] = -rot_step
-        elif key in [65361, 81]: omega[1] = -rot_step
-        elif key in [65363, 83]: omega[1] = rot_step
+        elif key in [65361, 81]: omega[1] = rot_step
+        elif key in [65363, 83]: omega[1] = -rot_step
         elif key == ord(','): omega[2] = -rot_step
         elif key == ord('.'): omega[2] = rot_step
 
@@ -639,8 +639,10 @@ def main():
     # DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS"
     DEFAULT_BASE_DIR = "/home/chini/3dgs"
     # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/classroom_2-f1950/splatfacto/2026-10-07_081151/config.yml"
-    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/three_rooms-f3000/splatfacto/2026-10-06_180039/config.yml"
+    # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/three_rooms-f3000/splatfacto/2026-10-06_180039/config.yml"
     # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/classroom_1-f1250/splatfacto/2026-10-07_063413/config.yml"
+    # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/stacey_room-f2500/splatfacto/2026-10-08_182851/config.yml"
+    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/stacey_room_train-f4200/splatfacto/2026-10-11_105953/config.yml"
 
     ap = argparse.ArgumentParser()
     ap.add_argument("config", type=Path, nargs="?", default=Path(DEFAULT_CONFIG))

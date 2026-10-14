@@ -12,3 +12,6 @@ room_output/
 room_output_LPIP/
 runs/
 verification/
+Hierarchical-Localization/
+hloc_baseline/__pycache__
+query_eval_out/
