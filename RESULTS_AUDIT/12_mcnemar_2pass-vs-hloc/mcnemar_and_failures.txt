@@ -1,0 +1,21 @@
+Office (stacey) : ours 2-pass EfficientLoFTR  vs  HLoc (num_loc=20)
+computed 2026-10-27 from stacey_2pass_summary.txt (ours) + HLoc stacey results.csv
+metric thresholds, scale 1.9826 m/unit, n=159 aligned queries.
+
+PAIRED SUCCESS (McNemar exact, two-sided)
+  5cm/5deg : ours 127/159 = 79.9%   HLoc 113/159 = 71.1%
+             b(ours wins alone)=35  c(HLoc wins alone)=21  both=92  neither=11
+             McNemar exact p = 0.081      (ours ahead, not significant)
+  10cm/5deg: ours 139/159 = 87.4%   HLoc 115/159 = 72.3%
+             b=34  c=10  both=105  neither=10
+             McNemar exact p = 0.00039    (ours significantly better)
+
+FAILURE MODES, ours 2-pass at 10cm/5deg (20 fails):
+  no-consensus (10)        fine stage didn't move the seed - no PnP consensus:
+     q28 q29 q30 q31 q32 q33 q81 q82 q112 q150
+  wrong-but-consistent (4) PnP locked a wrong solution (t or r got worse):
+     q52 q131 q132 q154
+  partial-recovery (6)     moved toward answer in both t and r, still missed:
+     q128 q129 q152 q155 q158 q159
+
+ours per-query source: query_eval 2-pass rerun, 2026-10-27 (159 fresh reports).

@@ -15,3 +15,7 @@ verification/
 Hierarchical-Localization/
 hloc_baseline/__pycache__
 query_eval_out/
+# large raw outputs — keep only the summaries in RESULTS_AUDIT/
+metric_runs/
+query_render_pairs/
+nohup.out

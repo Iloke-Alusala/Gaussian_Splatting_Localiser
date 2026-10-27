@@ -1,0 +1,6 @@
+HLoc on 159 queries   localised 159/159
+translation: median 0.0063 units  mean 0.1092 units
+rotation:    median 0.342 deg  mean 19.050
+time:        593.3 ms/query (amortized localize_sfm)
+recall: 5cm_5deg=72% [64-78]  10cm_5deg=72% [65-79]  25cm_2deg=70% [63-77]  50cm_10deg=73% [66-79]  (95% wilson CI in [])
+note: errors are in nerfstudio scene units; the recall labels' cm assume 1 unit = 1 m

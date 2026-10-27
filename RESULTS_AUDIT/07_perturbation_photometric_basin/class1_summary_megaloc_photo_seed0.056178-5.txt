@@ -1,0 +1,10 @@
+megaloc on 40 queries (images), photometric fine (lpips, 500-iter cap)
+translation: median 10.55 cm  mean 12.20 cm  (median 0.0296 u @ 3.5601 m/u)
+rotation:    median 3.176 deg  mean 3.365
+time:        median 36713 ms/query  (coarse+fine online; first query includes model warmup)
+recall: 5cm_5deg=2% [0-13]  10cm_5deg=45% [31-60]  25cm_2deg=12% [5-26]  50cm_10deg=100% [91-100]  (95% wilson CI in [])
+note: scale 3.5601 m/scene-unit (door-frame measurement); recall cm are real cm
+photometric: lr_trans=0.0002 lr_rot=0.0002  loss=lpips  cap=500  schedule=cosine(eta_min=1e-6)  stops: loss<1e-9 / |step|<1e-6 / max_iters
+iters:  median 500  mean 462  min 205  max 500
+hit cap without converging: 21/40
+gpu peak:    0.69 GB alloc  0.76 GB reserved (this process)

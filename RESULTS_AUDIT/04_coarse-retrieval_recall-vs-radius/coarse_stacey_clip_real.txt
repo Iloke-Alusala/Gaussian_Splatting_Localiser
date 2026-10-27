@@ -1,0 +1,7 @@
+coarse stage: clip on real queries, scene=stacey
+recall@N (rows) at same-place radius R (cols), scene units:
+              R=0.05     R=0.1    R=0.25
+  recall@1    0.6%     8.2%    37.1%
+  recall@5    3.1%    11.9%    45.9%
+  recall@10   4.4%    15.7%    52.2%
+note: errors are in nerfstudio scene units; no metric scale on this map

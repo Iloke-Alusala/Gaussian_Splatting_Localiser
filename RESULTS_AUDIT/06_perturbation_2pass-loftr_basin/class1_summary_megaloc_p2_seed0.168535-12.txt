@@ -1,0 +1,7 @@
+megaloc on 100 queries (images), 2 fine pass(es)
+translation: median 4.20 cm  mean 15.51 cm  (median 0.0118 u @ 3.5601 m/u)
+rotation:    median 0.371 deg  mean 4.800
+time:        median 217 ms/query  (coarse+fine online; first query includes model warmup)
+recall: 5cm_5deg=64% [54-73]  10cm_5deg=77% [68-84]  25cm_2deg=77% [68-84]  50cm_10deg=81% [72-87]  (95% wilson CI in [])
+note: scale 3.5601 m/scene-unit (door-frame measurement); recall cm are real cm
+gpu peak:    1.06 GB alloc  1.61 GB reserved (this process)

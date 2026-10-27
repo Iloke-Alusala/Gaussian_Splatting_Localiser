@@ -1,0 +1,7 @@
+coarse stage: megaloc on rendered queries, scene=stacey
+recall@N (rows) at same-place radius R (cols), scene units:
+              R=0.05     R=0.1    R=0.25
+  recall@1    0.1%     1.2%    42.7%
+  recall@5    0.4%     2.1%    56.6%
+  recall@10   0.5%     3.0%    62.1%
+note: errors are in nerfstudio scene units; no metric scale on this map

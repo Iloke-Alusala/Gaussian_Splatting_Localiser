@@ -1,0 +1,8 @@
+HLoc full online timing, 104 queries, resize_max=1024, num_loc=20
+  SuperPoint extract            37.6 ms/query   (3.91s / 104)
+  NetVLAD extract              114.9 ms/query   (11.95s / 104)
+  retrieval (NN search)         10.0 ms/query   (1.04s / 104)
+  LightGlue match (20 db)      293.6 ms/query   (30.53s / 104)
+  localize_sfm (PnP)            37.3 ms/query   (3.87s / 104)
+  TOTAL online                 493.4 ms/query   (51.31s / 104)
+  gpu peak                   1.23 GB alloc  1.68 GB reserved (this process)

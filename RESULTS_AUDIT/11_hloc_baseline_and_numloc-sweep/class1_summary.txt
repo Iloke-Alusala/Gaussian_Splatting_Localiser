@@ -1,0 +1,5 @@
+HLoc on 104 queries   localised 104/104
+translation: median 0.0009 ns (0.09 cm)  mean 0.0013 ns
+rotation:    median 0.085 deg  mean 0.123
+time:        36.2 ms/query (amortized localize_sfm)
+recall: 5cm_5deg=100%  10cm_5deg=100%  25cm_2deg=100%  50cm_10deg=100%

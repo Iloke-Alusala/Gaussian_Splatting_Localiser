@@ -1,0 +1,7 @@
+coarse stage: megaloc on real queries, scene=class1
+recall@N (rows) at same-place radius R (cols), scene units:
+              R=0.05     R=0.1    R=0.25
+  recall@1   22.1%    51.0%    92.3%
+  recall@5   30.8%    55.8%    99.0%
+  recall@10  30.8%    57.7%    99.0%
+note: errors are in nerfstudio scene units; no metric scale on this map
