@@ -1,4 +1,6 @@
 from __future__ import annotations
+# RUN COMMAND:
+# conda run -n nerfstudio python mse_vs_lpips_ab.py <config.yml> --trials 5
 
 # Controlled A/B: same seed pose, MSE vs LPIPS photometric fine-refinement.
 # Produces the matched side-by-side numbers for the "LPIPS vs MSE" paragraph:
@@ -19,6 +21,7 @@ from my_pose_harness import (
 )
 from my_localizer import localise, freeze_map, assert_map_frozen
 
+# the old f2500 stacey splat, pass a config to run on the current maps
 DEFAULT_CONFIG = "/home/chini/3dgs/outputs/stacey_room-f2500/splatfacto/2026-10-08_182851/config.yml"
 
 
@@ -66,6 +69,7 @@ def main():
     camera, query = views[args.view]
     gt_c2w = to_4x4(camera.camera_to_worlds[0].cpu())
 
+    # NOTE this uses dataparser_scale, not the door-frame m_per_unit, so these cm are not the metric cm in RESULTS_METRIC.md
     def cm(u):
         return u / scale * 100.0  # scene units -> cm
 

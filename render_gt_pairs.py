@@ -1,10 +1,9 @@
-"""
-render_gt_pairs.py - for a scene, place the real query photo next to the splat
-rendered from the SAME position inside the map (the query's ground-truth pose).
-Reuses the query_eval machinery so the pose lands exactly where the eval numbers say.
+# RUN COMMAND:
+# conda run -n nerfstudio python render_gt_pairs.py --scene stacey --query q_00093 --out <dir>
 
-  python render_gt_pairs.py --scene stacey --query q_00093 --out <dir>
-"""
+# put the real query photo next to the splat rendered from the query's ground-truth pose, for the report figures
+# uses the query_eval GT loading so the pose lands exactly where the eval numbers say
+
 import argparse
 import json
 from pathlib import Path
@@ -24,6 +23,7 @@ from query_eval import (
 
 
 def to_np_img(x):
+    """tensor or array -> HxWx3 numpy in [0,1] for plt.imsave"""
     if isinstance(x, torch.Tensor):
         x = x.detach().cpu().numpy()
     return np.clip(x[..., :3], 0.0, 1.0)
@@ -46,6 +46,7 @@ def main():
     freeze_map(pipeline)
     dev = pipeline.device
 
+    # colmap -> nerf transform, same as query_eval
     Rm, s, t_off, resid = fit_colmap_to_nerf(pipeline, sc["scene_dir"])
     print(f"[info] colmap->nerf fit resid {resid:.4f} units")
     qgt = json.loads(Path(sc["query_gt"]).read_text())
@@ -56,6 +57,7 @@ def main():
         raise SystemExit(f"{qname} not in query_gt for {args.scene}")
     e = qgt[qname]
 
+    # load the photo upright and bring its intrinsics + GT pose into the same orientation
     query, k = load_upright(Path(sc["eval_dir"]) / qname)
     fx, fy, cx, cy = (float(x) for x in e["params"][:4])
     fx, fy, cx, cy, W, H = rot_intrinsics_cw(fx, fy, cx, cy, e["width"], e["height"], k)
@@ -68,6 +70,7 @@ def main():
         gt_np = gt_np @ np.linalg.matrix_power(roll, k)
     gt_pose = torch.from_numpy(gt_np).float()
 
+    # render the splat from the GT pose with the query's own intrinsics, so the two line up pixel for pixel
     render = render_rgb_and_depth(pipeline, qcam, gt_pose.to(dev).float())[0]
 
     q_img = to_np_img(query)

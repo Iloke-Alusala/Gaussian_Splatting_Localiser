@@ -1,29 +1,10 @@
 #!/usr/bin/env python
-"""
-Build the held-out query set + pseudo-ground-truth for the HLoc baseline.
+# RUN COMMAND:
+# conda run -n nerfstudio python hloc_baseline/make_query_set.py --scene classroom_1-f1250 --config <config.yml>
 
-Run in the *nerfstudio* conda env.
+# OLD query set: uses nerfstudio's held-out eval frames as queries and their COLMAP poses as pseudo-GT. the current eval uses registered stills (eval/<scene>/query_gt.json) instead
+# writes query_gt.json, query_list.txt, db_list.txt (the rest of the frames = the hloc db) and scale.json. only reads data/*/colmap/
 
-Why this exists
----------------
-HLOC_SETUP.md assumes separately-registered high-res query stills and a
-``query_gt.json`` produced by ``register_queries.sh``. Neither exists on this
-machine for any scene. Instead we reuse the frames nerfstudio already holds out
-as its *eval* split (``eval_mode: fraction``, ``train_split_fraction: 0.9``) -
-the exact same frames our own pipeline queries via
-``my_pose_harness.get_eval_views`` - and take their COLMAP poses (already in
-``images.bin``) as pseudo ground truth. The HLoc reference model is later built
-as ``sparse/0`` *minus* these frames so HLoc cannot read the answer out of its
-own map.
-
-Outputs (written under <out_dir>, default /home/chini/3dgs/hloc_out/<scene>/):
-  query_gt.json   per-eval-frame GT in COLMAP world frame (brief's shape)
-  query_list.txt  eval frame names (the queries)
-  db_list.txt     the remaining registered frames (the HLoc database)
-  scale.json      dataparser scale (COLMAP units -> nerfstudio units)
-
-Nothing under data/*/colmap/ is modified; this script only reads it.
-"""
 import argparse
 import json
 import os

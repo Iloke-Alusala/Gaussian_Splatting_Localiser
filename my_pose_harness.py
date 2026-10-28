@@ -202,6 +202,9 @@ class Metrics:
     lpips: float | None # perceptual distance via deep features. Lower is Better
 
 class Scorer:
+    """
+    Scores a render against a query image with PSNR, SSIM and (if it loads) LPIPS
+    """
     def __init__(self, device: str = "cuda", use_lpips: bool = True):
         from torchmetrics.functional import (
             peak_signal_noise_ratio,
@@ -232,6 +235,10 @@ class Scorer:
         return img.permute(2, 0, 1).unsqueeze(0)
 
     def score(self, rendered: torch.Tensor, query: torch.Tensor) -> Metrics:
+        """
+        Input : rendered and query images, both HWC
+        Output: Metrics with psnr, ssim and lpips (None if LPIPS didn't load)
+        """
         a = self._nchw(rendered).to(self.device)
         b = self._nchw(query).to(self.device)
 
@@ -278,10 +285,25 @@ def threshold_recall(errors_m_deg, thresholds=POSE_THRESHOLDS) -> dict[str, floa
         out[f"{int(t_thr * 100)}cm_{r_thr:g}deg"] = 100.0 * hits / max(len(errs), 1)
     return out
 
+
+def wilson_ci(k, n, z=1.96):
+    """wilson score interval for a binomial proportion, returned as percents.
+    closed-form so i don't need scipy/statsmodels. k successes out of n,
+    z=1.96 is the 95% level. recall at n=104/159 is a small sample, so quoting
+    a bare % hides how wide the real uncertainty is - this makes it explicit."""
+    if n <= 0:
+        return 0.0, 0.0
+    p = k / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, 100.0 * (centre - half)), min(100.0, 100.0 * (centre + half))
+
 # Section 5: The sweep. Sweeping through 
 
 @dataclass
 class SweepConfig:
+    """ Settings for run_sweep, filled in from the command line in main() """
     config_path: Path
     out_dir: Path = Path("harness_out")
     n_views: int = 5 # how many held-out query views to test
@@ -298,6 +320,11 @@ class SweepConfig:
     device: str = "cuda"
 
 def run_sweep(cfg: SweepConfig):
+    """
+    For each eval view, perturb its GT pose by every magnitude, render there and score the render against the real image.
+    Shows how fast the image metrics fall off as the pose gets worse, which is the shape of the error surface the fine stage has to descend.
+    Writes sweep.csv and error_surface.png to cfg.out_dir
+    """
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(cfg.seed)
     gen = torch.Generator().manual_seed(cfg.seed)

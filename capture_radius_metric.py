@@ -1,16 +1,9 @@
-"""
-capture_radius_metric.py - render-vs-render capture radius on a metric offset grid.
+# RUN COMMAND:
+# conda run -n nerfstudio python capture_radius_metric.py --scene stacey --trials 50 --passes 2
 
-for each trial we take a real train pose, render the splat at it (so query and map
-share appearance - the upper-bound, appearance-gap-free case), knock the pose off by
-a known metric offset in a random direction, then run the loftr+pnp fine stage and ask
-whether it climbs back to within 5cm/5deg of the base pose. offsets are given in cm and
-converted to scene units via the scene's m_per_unit, so the grid matches the pnp basin
-sweep (query_eval --seed-source perturb). runs in the nerfstudio env.
+# render-vs-render capture radius: the query is a splat render at a train pose, so there is no appearance gap and this is the upper bound for the fine stage
+# knock the pose off by each metric offset (cm, converted with m_per_unit), run loftr+pnp, and count it recovered if it lands within 5cm/5deg of the base pose
 
-reuses the proven fine stage (coarse_harness.localise_pnp) and perturbation helpers;
-nothing in those is modified.
-"""
 import argparse
 import os
 import time
@@ -52,6 +45,7 @@ def main():
     gen = torch.Generator().manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
+    # for each offset, pick random train poses and see how many trials climb back
     rows = []
     for (t_u, r_deg, t_cm, _r) in grid:
         recovered = 0
@@ -61,10 +55,12 @@ def main():
             base = poses[b]
             # render the query from the splat at the base pose -> render-vs-render
             query, _depth = render_rgb_and_depth(pipeline, cam, base.to(dev).float())
+            # knock the pose off by the offset in a random direction, then run the fine stage from there
             T = perturb_pose(base, make_perturbation(t_u, r_deg, generator=gen))
             for _p in range(args.passes):
                 T, _diag = localise_pnp(pipeline, cam, query, T, device=dev)
             t_err, r_err = pose_error(base.double(), T.cpu().double())
+            # recovered = back within 5cm/5deg of the base, in real metres
             if t_err * mpu < 0.05 and r_err < 5.0:
                 recovered += 1
             torch.cuda.empty_cache()
@@ -81,6 +77,7 @@ def main():
     block = "\n".join(lines)
     print("\n" + block)
 
+    # append to the results log so the run is never only in the terminal
     log_path = os.environ.get("RESULTS_LOG", "/home/chini/Desktop/3DGS/code/RESULTS_LOG.md")
     with open(log_path, "a") as fl:
         fl.write(f"\n## {time.strftime('%Y-%m-%d %H:%M')} | capture-radius (render-vs-render) | "

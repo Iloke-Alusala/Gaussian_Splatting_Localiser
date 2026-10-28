@@ -1,18 +1,9 @@
-"""
-sweep_num_loc.py - HLoc accuracy vs latency as a function of num_loc (how many
-retrieved db frames we LightGlue-match per query), so the speed comparison is a
-curve, not a single point.
+# RUN COMMAND:
+# conda run -n hloc python hloc_baseline/sweep_num_loc.py --scene stacey --num-loc 1 2 5 10 20
 
-The offline map (db SuperPoint, triangulation) and the per-query SuperPoint +
-NetVLAD features are already built by run_hloc.py and REUSED here untouched. For
-each num_loc we only redo the per-query work that actually scales with it:
-  retrieval (pick top-k db frames) -> LightGlue match those pairs -> PnP.
-Recall is scored with run_hloc.score() (identical recall math as the headline run).
-Latency = measured match + PnP here, plus the fixed per-query extraction cost
-(SuperPoint + NetVLAD + NN search) read from the existing timing_online.txt.
+# HLoc accuracy vs latency against num_loc (how many retrieved db frames get LightGlue-matched per query), so the speed comparison is a curve and not one point
+# reuses run_hloc's map + features, and only redoes retrieval -> LightGlue -> PnP per num_loc. scored with run_hloc.score(), latency adds the fixed extraction cost from timing_online.txt
 
-Run in the hloc env:  python sweep_num_loc.py --scene stacey
-"""
 import argparse
 import json
 import re
@@ -27,6 +18,7 @@ from run_hloc import SCENES, score, scale_of
 
 
 def sync():
+    """wait for the GPU to finish, so the timers measure the actual work"""
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 

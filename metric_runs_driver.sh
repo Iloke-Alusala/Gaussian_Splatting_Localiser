@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RUN COMMAND:
+# nohup bash metric_runs_driver.sh &      (progress in metric_runs/progress.log, touches metric_runs/DONE at the end)
+
 # overnight metric rerun. stable (unmodified query_eval compute) first, modified
 # code (coarse_harness --radii-cm, capture_radius_metric) last. each run is
 # isolated under a timeout so one hang can't sink the night. logs -> RESULTS_METRIC.md
@@ -13,6 +16,7 @@ DRV="$OUT/progress.log"
 trap 'echo "### $(date +%F_%H:%M) DRIVER EXIT" >>"$DRV"; touch "$OUT/DONE"' EXIT
 echo "### $(date +%F_%H:%M) DRIVER START" >"$DRV"
 
+# run one job under a timeout, log it to $LOGS/NAME.log and put its recall line in the progress log
 run(){ # run NAME TIMEOUT -- cmd...
   local name="$1" tmo="$2"; shift 3
   echo "### $(date +%H:%M) START $name" >>"$DRV"
@@ -50,7 +54,7 @@ for sc in class1 stacey; do
   done
 done
 
-# item 5 - photometric fine stage on the FULL query sets, MegaLoc seed
+# item 5 - photometric fine stage (slow, 5 h timeout per scene) on the FULL query sets, MegaLoc seed
 for sc in class1 stacey; do
   run "item5_${sc}" 18000 -- python query_eval.py --scene "$sc" --fine photometric \
     --photo-loss lpips --photo-iters 500 --photo-lr-trans 2e-4 --photo-lr-rot 2e-4 \

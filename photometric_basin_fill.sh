@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RUN COMMAND:
+# nohup bash photometric_basin_fill.sh &      (progress in metric_runs/progress_photofill.log)
+
 # Fills the missing (`--`) photometric-basin cells of tab:basin. Extends item 4
 # of metric_runs_driver.sh to the wider offsets, keeping every photometric setting
 # identical to the tight-end runs so the column stays comparable. Isolated under a
@@ -13,6 +16,7 @@ OUT="$CODE/metric_runs"; LOGS="$OUT/logs"; mkdir -p "$LOGS"
 DRV="$OUT/progress_photofill.log"
 echo "### $(date +%F_%H:%M) PHOTO-FILL START" >"$DRV"
 
+# same helper as metric_runs_driver.sh: one job under a timeout, recall line into the progress log
 run(){ # run NAME TIMEOUT -- cmd...
   local name="$1" tmo="$2"; shift 3
   echo "### $(date +%H:%M) START $name" >>"$DRV"

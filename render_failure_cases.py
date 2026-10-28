@@ -1,23 +1,9 @@
-"""
-render_failure_cases.py - side-by-side panels for queries where our pipeline wins
-and the HLoc baseline fails (stacey_room).
+# RUN COMMAND:
+# conda run -n nerfstudio python render_failure_cases.py --scene stacey --queries q_00093 q_00067 q_00114 --out <dir> --hloc-dir /home/chini/3dgs/hloc_out/stacey/hloc
 
-For each requested query we draw one row with five panels:
+# 5-panel rows for queries where we win and HLoc fails: query | ours render@pose | ours MegaLoc seed | HLoc NetVLAD pick | HLoc render@pose
+# panels 2 and 5 are the fair comparison, the SAME splat rendered at each method's estimated pose next to the real photo
 
-  [1] query photo            the real eval image (loaded upright, as everywhere else)
-  [2] ours: render@our pose  splat rendered at the pose our pipeline estimates
-  [3] ours: MegaLoc pick     the train/db frame our coarse stage retrieved (the seed)
-  [4] HLoc: NetVLAD pick     the top db frame HLoc's coarse (retrieval) stage picked
-  [5] HLoc: render@its pose  splat rendered at the pose HLoc's PnP returned
-
-Panels 2 and 5 are the honest comparison: both render the SAME splat, one at our
-estimated pose, one at HLoc's, next to the real photo it should match. Everything
-reuses the proven coarse_harness / query_eval machinery so the poses line up with
-the numbers already in the result CSVs. Runs in the nerfstudio env.
-
-  python render_failure_cases.py --scene stacey --queries q_00093 q_00067 q_00114 \
-      --out <dir> --hloc-dir /home/chini/3dgs/hloc_out/stacey/hloc
-"""
 import argparse
 import json
 from pathlib import Path
@@ -118,6 +104,7 @@ def main():
             return load_upright(p)[0]
         return None
 
+    # point the borrowed coarse stage at the retriever we want, no GUI rotation
     pr.RETRIEVER_NAME = args.retriever
     pr.ROT90_CW = False
     pr._DATASET_NAME = sc["name"]
@@ -127,6 +114,7 @@ def main():
     print(f"[info] colmap->nerf fit resid {resid:.4f} units")
     qgt = json.loads(Path(sc["query_gt"]).read_text())
 
+    # HLoc's final poses and its NetVLAD top-1 per query, straight from its output files
     hloc_poses = parse_hloc_poses(Path(args.hloc_dir) / "results.txt")
     hloc_top = parse_netvlad_top(Path(args.hloc_dir) / "pairs-query-netvlad20.txt")
 

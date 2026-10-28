@@ -1,16 +1,9 @@
-"""
-Write EXIF-upright copies of the query stills + a matching query_gt, so HLoc
-(SuperPoint+LightGlue, which isn't rotation-invariant) sees them the same way up
-as the portrait database - the standard way to feed HLoc.
+# RUN COMMAND:
+# python hloc_baseline/make_upright_queries.py --scene-dir <scene>-processed --subdir query_d1280 --query-gt query_gt_d1280.json
 
-The stills are stored landscape with an EXIF rotate flag; cv2/colmap read the raw
-buffer and ignore it, which is why the raw run came out ~90 deg off. Here we bake
-the rotation into new files under images/<subdir>_up/ and rotate the intrinsics to
-match. The GT R/t is left as-is (raw frame): camera CENTRE is roll-invariant so
-translation scores directly, and eval_hloc --upright undoes the 90 deg for rotation.
+# the stills are stored landscape with an EXIF rotate flag, which cv2/colmap ignore. SuperPoint+LightGlue isn't rotation-invariant, so write upright copies to images/<subdir>_up/ plus a query_gt with rotated intrinsics
+# GT R/t stays in the raw frame: the camera centre doesn't change with roll, so translation still scores directly. PIL + numpy only, runs in any env
 
-Runs in any env (PIL + numpy only). Writes nothing over existing files.
-"""
 import argparse
 import json
 from pathlib import Path
@@ -23,6 +16,7 @@ _EXIF_K = {1: 0, 3: 2, 6: 1, 8: 3}        # 90-deg CW turns to make upright
 
 
 def rot_intrinsics_cw(fx, fy, cx, cy, W, H, k):
+    """turn raw-buffer intrinsics k times 90-deg CW to match the upright image (same as query_eval)"""
     for _ in range(k):
         fx, fy, cx, cy, W, H = fy, fx, (H - 1 - cy), cx, H, W
     return fx, fy, cx, cy, W, H
@@ -45,6 +39,7 @@ def main():
     for name, e in qgt.items():
         im = Image.open(src / name)
         k = _EXIF_K.get(im.getexif().get(_EXIF_ORIENT, 1), 0)
+        # bake the EXIF rotation into the pixels, then rotate the intrinsics the same number of turns
         ImageOps.exif_transpose(im).convert("RGB").save(dst / name, quality=95)
 
         fx, fy, cx, cy = (float(x) for x in e["params"][:4])

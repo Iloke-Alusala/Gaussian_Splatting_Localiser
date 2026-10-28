@@ -1,16 +1,9 @@
-"""
-make_report_tables.py - build the thesis comparison tables straight from the
-summary files the harnesses already write, so the numbers in the report can't
-drift from the numbers on disk. reads only; writes report_tables.md.
+# RUN COMMAND:
+# python make_report_tables.py
 
-sources per scene:
-  ours : query_eval_out/<scene>/summary_megaloc_p{1,2,3}.txt, summary_megaloc_photo.txt,
-         summary_clip_p2.txt
-  hloc : /home/chini/3dgs/hloc_out/<scene>/hloc/summary.txt + timing_online.txt
-  map  : the splat checkpoint size, + gaussian counts from the P3 block in RESULTS_LOG
-recall gets a 95% wilson CI recomputed from (pct, n) so even older logged runs
-(which pre-date the inline CI) get an interval. no metric scale: everything is units.
-"""
+# build the thesis comparison tables straight from the summary files on disk, so the report can't drift from the runs. reads only, writes report_tables.md
+# ours from query_eval_out/<scene>/summary_*.txt, hloc from hloc_out/<scene>/hloc/, gaussian counts from the P3 block in RESULTS_LOG. scene units (the metric tables live in RESULTS_METRIC.md)
+
 import math
 import re
 from pathlib import Path
@@ -48,6 +41,7 @@ def wilson_ci(k, n, z=1.96):
 
 
 def _f(pattern, text, cast=float, default=None):
+    """first regex group in text, cast, or default if it isn't there"""
     m = re.search(pattern, text)
     return cast(m.group(1)) if m else default
 
@@ -76,6 +70,7 @@ def parse_summary(path):
 
 
 def parse_hloc_timing(path):
+    """full online ms/query and peak VRAM from hloc's timing_online.txt"""
     if not path.exists():
         return {}
     txt = path.read_text()
@@ -97,6 +92,7 @@ def parse_p3_counts():
 
 
 def _recall_cell(rec, key):
+    """table cell: 87% [80-92]"""
     if key not in rec:
         return "-"
     pct, lo, hi = rec[key]
@@ -104,6 +100,7 @@ def _recall_cell(rec, key):
 
 
 def scene_section(scene, cfg, p3):
+    """one scene's head-to-head table (ours 1/2/3-pass, photometric, CLIP, HLoc) plus its resources block"""
     lines = [f"## {scene}", ""]
     ours = {tag: parse_summary(cfg["ours"] / f"summary_{tag}.txt")
             for tag in ("megaloc_p1", "megaloc_p2", "megaloc_p3",

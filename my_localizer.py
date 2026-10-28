@@ -1,4 +1,9 @@
 from __future__ import annotations
+# RUN COMMAND:
+# conda run -n nerfstudio python my_localizer.py <config.yml> --step 6
+
+# Fine stage of the localiser. Steps 1-4 build and sanity check the photometric (pose-only gradient descent) refiner, 5 sweeps its capture radius and 6 runs CLIP coarse -> photometric fine end to end.
+# config defaults to DEFAULT_CONFIG in main(). We chdir 4 levels above config.yml so nerfstudio finds its checkpoints
 
 # import libraries
 import argparse
@@ -349,6 +354,7 @@ def check_step3(pipeline, views, scale) -> None:
 
 @dataclass
 class LocaliseResult:
+    """ What localise() returns: final pose, how many iterations, why it stopped, and the loss/pose history """
     T_final: torch.Tensor
     iterations: int
     termination: str
@@ -364,8 +370,9 @@ def localise(
         lr_rot: float = 2e-3,
         tol_loss: float = 1e-9, 
         tol_step: float = 1e-6, 
-        loss_type: str = "mse", # <--- NEW: Dynamic metric selection
-        debug_name: str = "debug_localise"
+        loss_type: str = "mse", # "mse" or "lpips", which photometric objective to descend
+        debug_name: str = "debug_localise",
+        lpips_fn=None,          # pass a pre-built LPIPS model to reuse across calls
         ) -> LocaliseResult:
     """
     The localiser. Descend the photometric objective from T_init back to the query pose
@@ -375,9 +382,11 @@ def localise(
     device = T_init.device
     dtype = T_init.dtype
 
-    # Create the metrics functions that you chose and are going to use
-    lpips_loss_fn = None
-    if loss_type == "lpips":
+    # Create the metrics functions that you chose and are going to use.
+    # reuse a caller-supplied model if given - rebuilding VGG every call leaks
+    # GPU memory across a query set and OOMs the 4GB card after a few queries.
+    lpips_loss_fn = lpips_fn
+    if loss_type == "lpips" and lpips_loss_fn is None:
         from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
         lpips_loss_fn = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
 
@@ -389,9 +398,11 @@ def localise(
     actual_iters = 0
     prev_loss: float | None = None
 
+    # rho is the translation update and phi the rotation update. Kept as two tensors so they get their own learning rates
     rho = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
     phi = torch.zeros(3, device=device, dtype=dtype, requires_grad=True)
 
+    # Cosine schedule decays the lr towards eta_min, so we take big steps early and settle without bouncing around the minimum at the end
     optimizer = torch.optim.Adam([
         {"params": [rho], "lr": lr_trans},
         {"params": [phi], "lr": lr_rot},
@@ -405,6 +416,7 @@ def localise(
         actual_iters = i + 1
         optimizer.zero_grad() 
 
+        # Reset the update to zero every iteration, so the gradient is always taken about the current pose T_curr and not the starting pose
         with torch.no_grad():
             rho.zero_()
             phi.zero_()
@@ -415,6 +427,7 @@ def localise(
         rendered = render_differentiable(pipeline, camera, T_candidate)
         rendered_rgb = rendered[..., :3]
         
+        # keep the first and last render for the debug grid at the end
         if i == 0:
             first_render = rendered.detach().clone()
         last_render = rendered.detach().clone()
@@ -427,7 +440,7 @@ def localise(
             q_nchw = query.permute(2, 0, 1).unsqueeze(0)
             import torch.nn.functional as F
 
-            # Downsample by 50% using bilinear interpolation
+            # Downsample by 50% using bilinear interpolation. 4x fewer pixels through VGG every iteration
             r_small = F.interpolate(r_nchw, scale_factor=0.5, mode='bilinear', align_corners=False)
             q_small = F.interpolate(q_nchw, scale_factor=0.5, mode='bilinear', align_corners=False)
 
@@ -438,6 +451,7 @@ def localise(
         current_loss = loss.item()
         loss_history.append(current_loss)
 
+        # Stop criteria 1: loss has stopped changing between iterations
         if prev_loss is not None and abs(prev_loss - current_loss) < tol_loss:
             termination = "loss_plateau"
             break
@@ -457,17 +471,19 @@ def localise(
                 psnr = -10.0 * math.log10(mse_val) if mse_val > 0 else float("inf")
                 print(f"    iter {i:03d} | {loss_type} loss: {current_loss:.4f} | psnr: {psnr:.2f} dB | |step|: {step_norm:.2e}")
 
+            # Stop criteria 2: the optimiser step is so small that we are not moving anymore. Criteria 3 is just hitting max_iters
             if step_norm < tol_step:
                 termination = "step_small"
                 break
 
+            # Fold the step into the pose, then free the render so memory doesn't build up across iterations
             T_curr = apply_update(T_curr, xi_step)
             pose_history.append(T_curr.clone())
 
             del rendered, rendered_rgb, loss, xi_step
             torch.cuda.empty_cache()
 
-    # Save the visuals (unchanged)
+    # Save the visuals. Top row is query | first render | last render, bottom row is the abs difference to the query
     if first_render is not None and last_render is not None:
         q_np = query.detach().cpu().numpy()
         q_img = (q_np * 255).astype(np.uint8)[:, :, ::-1]
@@ -609,7 +625,7 @@ def check_step5(pipeline, views, scale) -> None:
     """
     matplotlib.use("Agg")
     # Test a small set of magnitudes (t_mag in scene units, r_mag in degrees)
-    # Kept small so it finishes in a reasonable time while you eat
+    # Kept small so the sweep finishes in a reasonable time
     magnitudes = [
         (0.01, 0.5),
         (0.05, 2.0),
@@ -693,7 +709,7 @@ def get_clip_features(image: torch.Tensor, processor, model, device):
     if img_np.dtype in [np.float32, np.float64]:
         img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
         
-    # 3. PIL Image conversion is bulletproof for HuggingFace processors
+    # 3. Convert to a PIL image, the HuggingFace processor handles resizing and normalising from there
     pil_img = Image.fromarray(img_np)
     
     # 4. Extract features
@@ -868,11 +884,11 @@ def generate_interactive_query(pipeline, camera, start_pose: torch.Tensor, step_
         elif key == ord(','): omega[2] = -rot_step     # Roll Left
         elif key == ord('.'): omega[2] = rot_step      # Roll Right
 
-        # Build the 4x4 perturbation matrix using your robust so3_exp
+        # Build the 4x4 perturbation matrix using so3_exp from my_pose_harness
         if delta_t.any() or omega.any():
             delta = torch.eye(4)
             if omega.any():
-                delta[:3, :3] = so3_exp(omega) # Mathematically guarantees valid rotation
+                delta[:3, :3] = so3_exp(omega) # Rodrigues always gives a valid rotation matrix
             if delta_t.any():
                 delta[:3, 3] = delta_t
             
@@ -896,7 +912,7 @@ def main():
     torch.set_float32_matmul_precision('high')
     global save_path
 
-    # 1. Hardcode your persistent base directory and config path
+    # 1. Default base directory and config path, used when no config is passed in
     # DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS/data/desk-test-2/raw-images"
     # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/processed/splatfacto/2026-08-16_104231/config.yml"
     DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS"

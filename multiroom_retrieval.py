@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# multi-room coarse retrieval: can the retriever pick the RIGHT ROOM?
-# pool every room's train index into one bank, tag each row with its room,
-# then for each query take top-1 and check the room label matches.
-# no splat / no pose / no nerfstudio here - room-id only needs the embeddings.
-# reuses the cached per-room indices in .index_cache + the retriever classes.
+# RUN COMMAND:
+# conda run -n nerfstudio python multiroom_retrieval.py
+
+# multi-room coarse retrieval: pool every room's cached train index into one bank, tag each row with its room, and check top-1 lands in the right room
+# no splat / no pose here, room-id only needs the embeddings. writes RESULTS_MULTIROOM.md
 import time, glob, pickle
 import torch
 from torchvision.io import read_image
@@ -31,6 +31,7 @@ def load_img(path):
     return (read_image(path)[:3].float() / 255.0).permute(1, 2, 0).to(DEVICE)
 
 def build_bank(pkl_key):
+    """ stack every room's cached features into one bank. pkl_key 0 = megaloc, 1 = clip. labels[i] is the room of row i """
     feats, labels = [], []
     for room, paths in ROOMS.items():
         with open(paths[pkl_key], "rb") as f:
@@ -41,6 +42,7 @@ def build_bank(pkl_key):
     return torch.cat(feats, 0), labels
 
 def run(retriever, pkl_key, tag):
+    """ swap the pooled bank into the retriever, query every room's images, and count top-1 correct-room per room + overall """
     bank, labels = build_bank(pkl_key)
     retriever.index_features = bank
     retriever.index_poses = list(range(len(labels)))  # query() only needs its length

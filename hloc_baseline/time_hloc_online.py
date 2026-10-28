@@ -1,13 +1,9 @@
-"""
-Clean per-query ONLINE timing for HLoc, so we compare against our pipeline on
-real numbers instead of log timestamps. The offline map (db features, db
-matches, triangulation) is already built and reused; here we time only the work
-HLoc does per query: SuperPoint + NetVLAD extraction, retrieval, LightGlue
-matching against the retrieved db frames, and localize_sfm (PnP).
+# RUN COMMAND:
+# conda run -n hloc python hloc_baseline/time_hloc_online.py --scene stacey
 
-Each stage warms the model up once (untimed) then runs fresh with overwrite=True,
-GPU-synced around the timed call. Runs in the hloc env.
-"""
+# per-query ONLINE timing for HLoc, so we compare against our pipeline on measured numbers and not log timestamps. the offline map is already built by run_hloc.py and reused
+# times SuperPoint + NetVLAD on the queries, retrieval, LightGlue matching and localize_sfm. each stage warms up once (untimed), then a fresh GPU-synced run is timed
+
 import argparse
 import json
 import time
@@ -22,6 +18,7 @@ from run_hloc import SCENES      # same paths as the run that built the map
 
 
 def sync():
+    """wait for the GPU to finish, so the timers measure the actual work"""
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 

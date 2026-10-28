@@ -1,16 +1,12 @@
-"""
-HLoc baseline, one command per scene: build the map once, then localise the eval
-query photos against it and score vs COLMAP GT.
+# RUN COMMAND:
+# conda run -n hloc python hloc_baseline/run_hloc.py --scene stacey
 
-  conda run -n hloc python hloc_baseline/run_hloc.py --scene stacey
+# HLoc baseline: SuperPoint + LightGlue + NetVLAD, localised with PnP against a SuperPoint cloud triangulated on our COLMAP poses (db = sparse/0, already query-free)
+# the map only depends on the train frames, so it is built once and reused when the query set changes. pycolmap must be 3.13.0 (4.x breaks triangulation -> 0 points)
 
-SuperPoint + LightGlue + PnP against a SuperPoint cloud triangulated on our
-COLMAP poses (db = sparse/0, already query-free). The map depends only on the
-training frames, so it's built once and REUSED when you swap query sets.
-pycolmap must be 3.13.0 (4.x breaks triangulation -> 0 points).
-"""
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -46,6 +42,7 @@ THRESHOLDS = [(0.05, 5.0), (0.10, 5.0), (0.25, 2.0), (0.50, 10.0)]
 
 
 def scale_of(sc):
+    """colmap -> nerfstudio scale from dataparser_transforms.json, so hloc errors land in the same units as ours"""
     dp = sc["config"].parent / "dataparser_transforms.json"
     return float(json.loads(dp.read_text())["scale"])
 
@@ -58,6 +55,7 @@ def write_query_intrinsics(qgt, out):
 
 
 def centre(R, t):
+    """camera centre in world from a world->cam R, t"""
     return -R.T @ np.asarray(t, float)
 
 
@@ -97,20 +95,61 @@ def score(results, qgt, scale, logs_path, time_ms, out_dir):
         for n, te, re, ni in rows:
             w.writerow([n, round(te, 5), round(re, 4), ni, time_ms, round(te * scale, 5)])
 
+    # wilson 95% CI for a proportion, as percents. copied (not imported from
+    # my_pose_harness) on purpose: that module pulls nerfstudio deps and this
+    # runs in the hloc env, which must stay off them.
+    def wilson_ci(k, nn, z=1.96):
+        if nn <= 0:
+            return 0.0, 0.0
+        p = k / nn
+        den = 1.0 + z * z / nn
+        c = (p + z * z / (2 * nn)) / den
+        h = z * math.sqrt(p * (1 - p) / nn + z * z / (4 * nn * nn)) / den
+        return max(0.0, 100.0 * (c - h)), min(100.0, 100.0 * (c + h))
+
     t, r = np.array(t_errs), np.array(r_errs)
     fin = np.isfinite(t)
     rec = {f"{int(tt*100)}cm_{rr:g}deg":
            100 * np.mean((t * scale < tt) & (r < rr)) for tt, rr in THRESHOLDS}
     lines = [
         f"HLoc on {len(rows)} queries   localised {n_loc}/{len(rows)}",
-        f"translation: median {np.median(t[fin])*scale:.4f} ns ({np.median(t[fin])*scale*100:.2f} cm)  "
-        f"mean {t[fin].mean()*scale:.4f} ns",
+        f"translation: median {np.median(t[fin])*scale:.4f} units  "
+        f"mean {t[fin].mean()*scale:.4f} units",
         f"rotation:    median {np.median(r[fin]):.3f} deg  mean {r[fin].mean():.3f}",
         f"time:        {time_ms:.1f} ms/query (amortized localize_sfm)",
-        "recall: " + "  ".join(f"{k}={v:.0f}%" for k, v in rec.items()),
+        "recall: " + "  ".join(
+            f"{k}={v:.0f}% [{wilson_ci(round(v*len(rows)/100), len(rows))[0]:.0f}-"
+            f"{wilson_ci(round(v*len(rows)/100), len(rows))[1]:.0f}]"
+            for k, v in rec.items()) + "  (95% wilson CI in [])",
+        # same unit as query_eval's "units" (colmap x dataparser scale). no metric
+        # scale on these maps, so the cm in the recall names is just an assumption
+        "note: errors are in nerfstudio scene units; the recall labels' cm assume 1 unit = 1 m",
     ]
     (out_dir / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n" + "\n".join(lines))
+
+
+def archive_run(out, sc, args):
+    """snapshot this run's query-specific logs so a later run on a different query
+    set can't clobber them. map files (feats/sfm/netvlad) stay put and get reused."""
+    import shutil
+    stamp = time.strftime("%Y-%m-%d_%H%M")
+    arc = out / "runs" / stamp
+    arc.mkdir(parents=True, exist_ok=True)
+    keep = ["summary.txt", "results.csv", "results.txt", "results.txt_logs.pkl",
+            "query_intrinsics.txt", f"pairs-query-netvlad{args.num_loc}.txt",
+            "loc_matches.h5"]
+    for f in keep:
+        p = out / f
+        if p.exists():
+            shutil.copy2(p, arc / f)
+    # keep the exact script that made these numbers right next to them
+    shutil.copy2(__file__, arc / "run_hloc.py")
+    (arc / "meta.txt").write_text(
+        f"scene={args.scene}\ndb_model={sc['scene_dir']}\nquery_gt={sc['query_gt']}\n"
+        f"resize_max={args.resize_max} num_covis={args.num_covis} num_loc={args.num_loc}\n"
+        f"time={stamp}\n")
+    print(f"[archive] run logs saved -> {arc}")
 
 
 def main():
@@ -178,6 +217,8 @@ def main():
         f.write(f"\n## {time.strftime('%Y-%m-%d %H:%M')} | hloc (run_hloc) | scene={args.scene}\n"
                 f"db model: {sc['scene_dir']}\nqueries: {sc['query_gt']}\n```\n"
                 + (out / "summary.txt").read_text() + "```\n")
+    # permanent per-run snapshot so re-runs on other query sets don't overwrite it
+    archive_run(out, sc, args)
 
 
 if __name__ == "__main__":

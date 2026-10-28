@@ -1,17 +1,9 @@
-"""
-measure_splat_resources.py - the P3 numbers: per-scene Gaussian count, on-disk
-checkpoint size, and the VRAM + wall-clock cost of loading a splat. this is the
-evidence for the "room-scoped loading keeps it viable on a low-VRAM robot" claim.
+# RUN COMMAND:
+# conda run -n nerfstudio python measure_splat_resources.py
 
-two measurements that matter:
-  - single room: load one scene's splat, peak VRAM + load time (what the robot
-    actually pays when it loads just the room the coarse stage picked).
-  - all rooms:   load every scene's splat at once, peak VRAM + total load time
-    (the naive "load everything" the room-scoping is supposed to avoid).
+# per-scene gaussian count, checkpoint size, and the VRAM + time to load a splat. evidence for "room-scoped loading keeps it viable on a low-VRAM robot"
+# loads each room alone (what the robot actually pays), then every room at once (the naive version room-scoping avoids). appends to RESULTS_LOG.md
 
-no metric scale on these maps, so sizes are bytes/counts, not metres. runs in
-the nerfstudio env. appends to RESULTS_LOG.md like the other harnesses.
-"""
 import time
 from pathlib import Path
 
@@ -27,6 +19,7 @@ def _ckpt_path(config: Path) -> Path:
 
 
 def _gaussian_count(pipeline) -> int:
+    """number of gaussians in the loaded splat"""
     return int(pipeline.model.gauss_params["means"].shape[0])
 
 

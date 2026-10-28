@@ -1,9 +1,15 @@
+# RUN COMMAND:
+# conda run -n nerfstudio python interactive_localizer_LOFTR.py <config.yml> [--mode sweep] [--rot90]
+
+# The earlier CLIP-only version of pipeline_retriever.py. Coarse = CLIP, fine = EfficientLoFTR + depth lift + PnP, with the interactive viewer and the capture-radius sweep.
+# Superseded by pipeline_retriever.py (adds MegaLoc), kept for the original CLIP results
+
 import argparse
 import copy
 import math
 import os
 import sys
-import csv                     # NEW: writing the sweep results table
+import csv                     # writing the sweep results table
 from pathlib import Path
 
 import cv2
@@ -22,8 +28,7 @@ from my_localizer import (
     freeze_map
 )
 
-#perturbation helpers for the sweep. These live in my_pose_harness (the
-# diagnostic). If yours are somewhere else, change this import to match.
+#perturbation helpers for the sweep. These live in my_pose_harness (the diagnostic)
 from my_pose_harness import make_perturbation, perturb_pose
 
 # Adjust the path to wherever you cloned the repo
@@ -41,7 +46,7 @@ os.makedirs(DIAG_DIR, exist_ok=True)
 
 # the perturbation grid for the capture-radius sweep.
 # Each pair is (translation magnitude in SCENE UNITS, rotation magnitude in DEG).
-# Your seed of 0.39 units / 8.4 deg already succeeded, so this range pushes well
+# A seed of 0.39 units / 8.4 deg already succeeded, so this range pushes well
 # past it to find where EfficientLoFTR stops matching and the fine stage breaks.
 # If the curve never peels away from y=x (i.e. it always recovers), widen the top
 # end. If it breaks immediately, halve the whole range.
@@ -52,22 +57,9 @@ SWEEP_MAGNITUDES = [
     (0.20, 10.0),
 ]
 
-# ============================================================================
-# NEW: 90 DEGREE CLOCKWISE VIEW ROTATION
-# ----------------------------------------------------------------------------
-# For datasets captured rotated 90 degrees anti-clockwise. This is a VIEW-ONLY
-# correction: every image written to disk or shown on screen is rotated 90 deg
-# clockwise so it reads upright.
-#
-# It deliberately does NOT touch the matching or pose path. The splat was
-# trained on the rotated images, so renders and queries are already in the same
-# rotated frame and match each other correctly. Rotating the tensors fed to
-# EfficientLoFTR would also require swapping fx/fy, cx/cy, width/height and
-# inverse-rotating the keypoints before the depth lift, and any slip there
-# silently corrupts PnP. Nothing geometric changes here.
-#
-# Toggled by --rot90 on the command line.
-# ============================================================================
+# 90 DEGREE CLOCKWISE VIEW ROTATION (--rot90), for datasets captured rotated 90 deg anti-clockwise
+# VIEW ONLY: images shown on screen or saved to disk get rotated so they read upright. Matching and PnP are not touched
+# The splat was trained on the rotated images, so renders and queries are already in the same frame. Rotating what goes into EfficientLoFTR would mean swapping fx/fy, cx/cy, W/H and un-rotating keypoints before the depth lift, and any slip there silently breaks PnP
 ROT90_CW = False
 
 
@@ -91,12 +83,14 @@ def _rot90_pts(pts, h_orig: int) -> np.ndarray:
 
 
 def _to_bgr_u8(img, rotate: bool = True):
+    """ [0,1] RGB tensor/array -> uint8 BGR for OpenCV, rotated if --rot90 is on """
     a = img.detach().cpu().numpy() if hasattr(img, "detach") else np.asarray(img)
     a = (a[..., :3] * 255).clip(0, 255).astype(np.uint8)
     a = a[..., ::-1].copy()             # RGB -> BGR
     return _rot90_img(a) if rotate else a
 
 def _label(img, text):
+    """ Write a green label in the top left corner of the image """
     cv2.putText(img, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
     return img
 
@@ -128,6 +122,7 @@ def draw_loftr_matches(query_rgb, render_rgb, kpts_q, kpts_r, out_path, max_draw
     cv2.imwrite(out_path, canvas)
 
 def _render_rgb(pipeline, camera, pose):
+    """ Render at pose and return it ready for cv2.imwrite """
     rgb, _ = render_rgb_and_depth(pipeline, camera, pose.to(pipeline.device).float())
     return _to_bgr_u8(rgb)
 
@@ -150,7 +145,7 @@ def _pl_tolerant_load(path):
     Load a Lightning-saved .ckpt without pytorch_lightning installed.
     Any pytorch_lightning/lightning global in the pickle is replaced with a
     throwaway dummy. We only read ['state_dict'] (plain tensors), so the
-    dummies are discarded. Safe because these are your own downloaded weights.
+    dummies are discarded. Safe because these are the official weights we downloaded.
     """
     def _dummy(name):
         return type(name, (), {
@@ -267,7 +262,7 @@ def generate_interactive_query(pipeline, camera, start_pose: torch.Tensor, step_
         img_tensor = render_at_pose(pipeline, camera, current_pose)
         img_np = (img_tensor.numpy()[..., :3] * 255).astype(np.uint8)
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-        img_bgr = _rot90_img(img_bgr)          # NEW: view-only rotation
+        img_bgr = _rot90_img(img_bgr)          # view-only rotation
 
         cv2.imshow("Interactive Query Generator (Press SPACE to lock)", img_bgr)
         key = cv2.waitKeyEx(0)
@@ -358,6 +353,7 @@ def efficient_loftr_localise(pipeline, camera, query: torch.Tensor, T_init: torc
         draw_loftr_matches(query, rendered_rgb, mkpts_query, mkpts_render,
                            os.path.join(viz_dir, name))
 
+    # Lift every render keypoint to 3D using the splat depth at that pixel. That gives 3D (render camera frame) to 2D (query) pairs for PnP
     cx, cy = camera.cx.item(), camera.cy.item()
     fx, fy = camera.fx.item(), camera.fy.item()
     depth = rendered_depth.squeeze(-1).cpu().numpy()
@@ -383,6 +379,7 @@ def efficient_loftr_localise(pipeline, camera, query: torch.Tensor, T_init: torc
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
     dist = np.zeros(4, dtype=np.float32)
 
+    # RANSAC throws out the bad LoFTR matches, EPnP solves the pose from the rest. The answer is the query pose relative to the render camera
     ok, rvec, tvec, inliers = cv2.solvePnPRansac(
         pts_3d, pts_2d_query, K, dist, flags=cv2.SOLVEPNP_EPNP
     )
@@ -390,6 +387,7 @@ def efficient_loftr_localise(pipeline, camera, query: torch.Tensor, T_init: torc
         print("  [warn] PnP failed.")
         return T_init
 
+    # rvec/tvec -> 4x4 offset matrix
     R_off, _ = cv2.Rodrigues(rvec)
     T_off = np.eye(4)
     T_off[:3, :3] = R_off
@@ -456,17 +454,9 @@ def run_interactive_localization(pipeline, views, scale) -> None:
          print("  [warn] Geometric solver failed to improve the coarse guess.")
 
 
-# ============================================================================
-# NEW: CAPTURE-RADIUS SWEEP
-# ----------------------------------------------------------------------------
-# Turns the single "it worked once" result into a curve. For each eval view we
-# take its known-good pose, knock it off by a controlled amount (perturb), run
-# the fine stage, and record how far the final pose still is from truth.
-# Reading the plot: as long as final error stays LOW while initial error grows,
-# the fine stage is recovering. The initial error at which the curve snaps back
-# up onto the y=x line (final == initial, i.e. no recovery) is the CAPTURE
-# RADIUS, and that number is the spec your coarse room-retrieval stage must meet.
-# ============================================================================
+# CAPTURE-RADIUS SWEEP
+# Turns the single "it worked once" result into a curve. For each eval view, knock its known pose off by a set amount, run the fine stage, and record how far the final pose still is from truth
+# Reading the plot: while final error stays LOW as initial error grows, the fine stage is recovering. Where the curve snaps back onto y=x (final == initial, no recovery) is the CAPTURE RADIUS, and that is the spec the coarse stage must meet
 
 def pnp_capture_radius_sweep(pipeline, views, scale, magnitudes, n_trials=10, device="cuda",
                              sample_dir=None):
@@ -570,6 +560,7 @@ def plot_capture_radius(rows, out_dir):
     print(f"  [info] wrote {png_path}")
 
 def run_capture_radius_sweep(pipeline, views, scale, n_trials=10) -> None:
+    """ --mode sweep entry point. Runs the sweep over SWEEP_MAGNITUDES and writes the CSV, plot and sample images to capture_radius_out/ """
     freeze_map(pipeline)
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_radius_out")
     sample_dir = os.path.join(out_dir, "samples")
@@ -588,18 +579,21 @@ def run_capture_radius_sweep(pipeline, views, scale, n_trials=10) -> None:
     print(f"  [done] {len(rows)} localisations. Plot in {out_dir}, sample images in {sample_dir}")
 
 def main():
-    global ROT90_CW                      # NEW
+    # set from the command line and read by the helpers above
+    global ROT90_CW
 
     torch.set_float32_matmul_precision('high')
 
     # DEFAULT_BASE_DIR = "/home/chini/Desktop/3DGS"
     DEFAULT_BASE_DIR = "/home/chini/3dgs"
-    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/three_rooms-f3000/splatfacto/2026-10-06_180039/config.yml"
+    # DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/three_rooms-f3000/splatfacto/2026-10-06_180039/config.yml"
+    DEFAULT_CONFIG = f"{DEFAULT_BASE_DIR}/outputs/stacey_room_train-f4200/splatfacto/2026-10-11_105953/config.yml"
+
 
     ap = argparse.ArgumentParser()
     ap.add_argument("config", type=Path, nargs="?", default=Path(DEFAULT_CONFIG))
     ap.add_argument("--device", default="cuda")
-    # NEW: pick what to run.
+    # pick what to run
     ap.add_argument("--mode", choices=["interactive", "sweep"], default="interactive",
                     help="interactive: fly to a query and localise once. "
                          "sweep: characterise the fine-stage capture radius.")
@@ -607,18 +601,19 @@ def main():
                     help="number of eval views to use in sweep mode")
     ap.add_argument("--trials", type=int, default=10,
                     help="random perturbation directions per magnitude in sweep mode")
-    # NEW: view-only 90 deg clockwise rotation, for datasets captured rotated
+    # view-only 90 deg clockwise rotation, for datasets captured rotated
     # 90 deg anti-clockwise. Affects displayed and saved images only.
     ap.add_argument("--rot90", action="store_true",
                     help="rotate every displayed and saved image 90 deg clockwise "
                          "(view only, does not change matching or pose geometry)")
     args = ap.parse_args()
 
-    ROT90_CW = args.rot90                # NEW
+    ROT90_CW = args.rot90
     if ROT90_CW:
         print("[info] --rot90 on: displayed and saved images rotated 90 deg clockwise. "
               "Matching and pose solving are unchanged.")
 
+    # nerfstudio paths in config.yml are relative, so run from 4 levels above it
     os.chdir(args.config.resolve().parents[4])
 
     print("[info] Loading pipeline...")
